@@ -286,11 +286,15 @@ input {
 }
 
 .call-card {
-  width: min(620px, 100%);
+  width: min(980px, 96vw);
+  max-height: 96vh;
+  max-height: 96dvh;
   overflow: hidden;
   padding: 0;
   border-color: #34434b;
   background: #202c33;
+  display: flex;
+  flex-direction: column;
 }
 
 .call-heading {
@@ -310,15 +314,39 @@ input {
 .call-videos {
   position: relative;
   display: grid;
+  height: clamp(300px, 58vh, 680px);
   min-height: 220px;
+  flex: 0 1 auto;
+  resize: vertical;
+  overflow: auto;
   place-items: center;
   background: #0b141a;
 }
 
 .call-videos video.remote-video {
   width: 100%;
-  max-height: min(52vh, 440px);
+  height: 100%;
+  max-height: 100%;
   object-fit: contain;
+}
+
+.call-videos.video-expanded {
+  height: clamp(380px, 74vh, 900px);
+}
+
+.call-videos audio {
+  display: none;
+}
+
+.call-controls button.audio-needed {
+  background: #d97706;
+  animation: audio-needed 900ms ease-in-out infinite alternate;
+}
+
+@keyframes audio-needed {
+  to {
+    box-shadow: 0 0 0 5px #f59e0b44;
+  }
 }
 
 .call-videos video.local-video {
@@ -336,6 +364,8 @@ input {
 
 .call-controls {
   display: flex;
+  flex-wrap: wrap;
+  flex: 0 0 auto;
   justify-content: center;
   gap: 11px;
   padding: 16px;
@@ -389,6 +419,35 @@ input {
   margin-top: 6px;
 }
 
+.call-card:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+  background: #0b141a;
+}
+
+.call-card:fullscreen .call-heading {
+  flex: 0 0 auto;
+}
+
+.call-card:fullscreen .call-videos {
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+  flex: 1 1 auto;
+  resize: none;
+}
+
+.call-card:fullscreen video.remote-video {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+}
+
 @media (max-width: 540px) {
   .messages {
     padding: 16px 10px;
@@ -405,6 +464,30 @@ input {
   .bubble img {
     max-width: 70vw;
     max-height: 45vh;
+  }
+
+  .call-card {
+    width: 100%;
+    max-height: 96dvh;
+  }
+
+  .call-videos {
+    height: 45vh;
+    min-height: 200px;
+  }
+
+  .call-videos.video-expanded {
+    height: 68vh;
+  }
+
+  .call-controls {
+    gap: 7px;
+    padding: 11px 8px;
+  }
+
+  .call-controls button {
+    min-width: 42px;
+    min-height: 42px;
   }
 }
 
