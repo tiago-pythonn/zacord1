@@ -190,6 +190,38 @@ test('users can exchange messages and conversations persist after restart', asyn
   assert.equal((await request(running.baseUrl, '/api/calls/inbox', { cookie: bob.cookie }))
     .value.signals.length, 0);
 
+  const iceCandidate = {
+    candidate: 'candidate:1 1 UDP 2122252543 192.0.2.1 50000 typ host',
+    sdpMid: '0',
+    sdpMLineIndex: 0,
+    usernameFragment: 'test-fragment',
+  };
+  const validIce = await request(running.baseUrl, '/api/calls/signals', {
+    method: 'POST',
+    body: {
+      conversationId,
+      toUsername: 'bob',
+      type: 'ice',
+      payload: { candidate: iceCandidate },
+    },
+    cookie: alice.cookie,
+  });
+  assert.equal(validIce.response.status, 202);
+  const invalidIce = await request(running.baseUrl, '/api/calls/signals', {
+    method: 'POST',
+    body: {
+      conversationId,
+      toUsername: 'bob',
+      type: 'ice',
+      payload: { candidate: 'candidate string without RTCIceCandidate fields' },
+    },
+    cookie: alice.cookie,
+  });
+  assert.equal(invalidIce.response.status, 400);
+  const receivedIce = await request(running.baseUrl, '/api/calls/inbox', { cookie: bob.cookie });
+  assert.equal(receivedIce.value.signals[0].type, 'ice');
+  assert.deepEqual(receivedIce.value.signals[0].payload.candidate, iceCandidate);
+
   const group = await request(running.baseUrl, '/api/groups', {
     method: 'POST',
     body: { name: 'Amigos', usernames: ['bob'] },
