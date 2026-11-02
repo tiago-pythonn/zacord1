@@ -5,8 +5,8 @@ import path from 'node:path';
 import test from 'node:test';
 import { createServer } from './server.js';
 
-async function startServer(dataFile) {
-  const server = createServer({ dataFile });
+async function startServer(dataFile, options = {}) {
+  const server = createServer({ dataFile, ...options });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   return {
     server,
@@ -69,6 +69,23 @@ test('users can exchange messages and conversations persist after restart', asyn
   assert.equal((await request(running.baseUrl, '/api/config', { cookie: alice.cookie })).response.status, 200);
   assert.equal((await request(running.baseUrl, '/api/config')).response.status, 401);
 
+  const profilePhoto = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p7sAAAAASUVORK5CYII=';
+  const updatedProfile = await request(running.baseUrl, '/api/me', {
+    method: 'PATCH',
+    body: { displayName: 'Alice', username: 'alice', avatarData: profilePhoto },
+    cookie: alice.cookie,
+  });
+  assert.equal(updatedProfile.response.status, 200);
+  assert.equal(updatedProfile.value.user.avatarData, profilePhoto);
+  const rejectedProfile = await request(running.baseUrl, '/api/me', {
+    method: 'PATCH',
+    body: { displayName: 'Changed name', username: 'alice', avatarData: 'not-an-image' },
+    cookie: alice.cookie,
+  });
+  assert.equal(rejectedProfile.response.status, 400);
+  const unchangedProfile = await request(running.baseUrl, '/api/me', { cookie: alice.cookie });
+  assert.equal(unchangedProfile.value.user.displayName, 'Alice');
+
   const { response: conversationResponse, value: conversationResult } = await request(
     running.baseUrl,
     '/api/conversations',
@@ -76,6 +93,20 @@ test('users can exchange messages and conversations persist after restart', asyn
   );
   assert.equal(conversationResponse.status, 200);
   const conversationId = conversationResult.conversation.id;
+  const bobConversationsBeforeMessage = await request(running.baseUrl, '/api/conversations', {
+    cookie: bob.cookie,
+  });
+  const aliceAvatarUrl = bobConversationsBeforeMessage.value.conversations
+    .find(conversation => conversation.id === conversationId).avatarUrl;
+  assert.match(aliceAvatarUrl, /^\/api\/users\/[a-f0-9-]+\/avatar\?v=/i);
+  const avatarResponse = await fetch(`${running.baseUrl}${aliceAvatarUrl}`, {
+    headers: { Cookie: bob.cookie },
+  });
+  assert.equal(avatarResponse.status, 200);
+  assert.equal(avatarResponse.headers.get('content-type'), 'image/png');
+  assert.equal(await avatarResponse.text(), Buffer.from(profilePhoto.split(',')[1], 'base64').toString());
+  const privateAvatar = await fetch(`${running.baseUrl}${aliceAvatarUrl}`);
+  assert.equal(privateAvatar.status, 401);
   const sent = await request(running.baseUrl, `/api/conversations/${conversationId}/messages`, {
     method: 'POST',
     body: { text: 'Olá, Bob!' },
@@ -90,6 +121,7 @@ test('users can exchange messages and conversations persist after restart', asyn
   );
   assert.equal(inbox.value.messages[0].text, 'Olá, Bob!');
   assert.equal(inbox.value.messages[0].username, 'alice');
+  assert.equal(inbox.value.messages[0].avatarUrl, aliceAvatarUrl);
 
   const image = await request(running.baseUrl, `/api/conversations/${conversationId}/messages`, {
     method: 'POST',
@@ -194,6 +226,8 @@ test('users can exchange messages and conversations persist after restart', asyn
     body: { username: 'alice', password: 'password-a' },
   });
   assert.equal(login.response.status, 200);
+  const restoredProfile = await request(running.baseUrl, '/api/me', { cookie: login.cookie });
+  assert.equal(restoredProfile.value.user.avatarData, profilePhoto);
   const persisted = await request(running.baseUrl, '/api/conversations', {
     cookie: login.cookie,
   });
@@ -295,4 +329,51 @@ test('a local frontend can use the local API with credentialed CORS', async t =>
     origin: 'https://untrusted.example',
   });
   assert.equal(denied.response.status, 403);
+});
+
+test('TURN credentials are fetched by the backend and cached for call configuration', async t => {
+  const previousUrl = process.env.ZACORD_TURN_CREDENTIALS_URL;
+  process.env.ZACORD_TURN_CREDENTIALS_URL =
+    'https://zacord-test.metered.live/api/v1/turn/credentials?apiKey=private-test-key';
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'zacord-turn-test-'));
+  let fetchCount = 0;
+  let running;
+  try {
+    running = await startServer(path.join(directory, 'data.json'), {
+      fetchImpl: async (url, options) => {
+        fetchCount += 1;
+        assert.equal(url, 'https://zacord-test.metered.live/api/v1/turn/credentials?apiKey=private-test-key');
+        assert.ok(options.signal);
+        return new Response(JSON.stringify([
+          { urls: 'stun:stun.example.com:3478' },
+          {
+            urls: 'turns:relay.example.com:443?transport=tcp',
+            username: 'temporary-user',
+            credential: 'temporary-password',
+          },
+        ]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      },
+    });
+  } finally {
+    if (previousUrl === undefined) delete process.env.ZACORD_TURN_CREDENTIALS_URL;
+    else process.env.ZACORD_TURN_CREDENTIALS_URL = previousUrl;
+  }
+  t.after(async () => {
+    await running.close();
+    const dataFile = path.join(directory, 'data.json');
+    if (fs.existsSync(dataFile)) fs.unlinkSync(dataFile);
+    fs.rmdirSync(directory);
+  });
+
+  const account = await request(running.baseUrl, '/api/register', {
+    method: 'POST',
+    body: { displayName: 'Turn User', username: 'turnuser', password: 'turn-password' },
+  });
+  const firstConfig = await request(running.baseUrl, '/api/config', { cookie: account.cookie });
+  const secondConfig = await request(running.baseUrl, '/api/config', { cookie: account.cookie });
+  assert.equal(firstConfig.response.status, 200);
+  assert.equal(firstConfig.value.iceServers[1].urls, 'turns:relay.example.com:443?transport=tcp');
+  assert.equal(firstConfig.value.iceServers[1].credential, 'temporary-password');
+  assert.equal(secondConfig.response.status, 200);
+  assert.equal(fetchCount, 1);
 });
