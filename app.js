@@ -17,6 +17,7 @@
     call: null,
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
     emojis: [],
+    conversationRenderKey: '',
   };
   let toastTimer;
 
@@ -44,6 +45,64 @@
   function initials(value) {
     return (value || '?').trim().split(/\s+/).slice(0, 2)
       .map(part => part[0] || '').join('').toUpperCase() || '?';
+  }
+
+  function setAvatar(element, imageData, label, avatarUrl = '') {
+    element.replaceChildren();
+    const source = imageData || (avatarUrl ? `${apiBase}${avatarUrl}` : '');
+    if (source) {
+      const image = document.createElement('img');
+      image.src = source;
+      image.alt = '';
+      image.title = label;
+      element.append(image);
+    } else {
+      element.textContent = initials(label);
+    }
+  }
+
+  async function prepareProfilePhoto(file) {
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      throw new Error('Escolha uma imagem JPEG, PNG ou WebP.');
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      throw new Error('A imagem original deve ter no máximo 10 MB.');
+    }
+    const objectUrl = URL.createObjectURL(file);
+    try {
+      const image = new Image();
+      await new Promise((resolve, reject) => {
+        image.onload = resolve;
+        image.onerror = () => reject(new Error('Não foi possível abrir essa imagem.'));
+        image.src = objectUrl;
+      });
+      const canvas = document.createElement('canvas');
+      canvas.width = 320;
+      canvas.height = 320;
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Não foi possível processar essa imagem.');
+      const side = Math.min(image.naturalWidth, image.naturalHeight);
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(
+        image,
+        (image.naturalWidth - side) / 2,
+        (image.naturalHeight - side) / 2,
+        side,
+        side,
+        0,
+        0,
+        canvas.width,
+        canvas.height,
+      );
+      for (let quality = 0.86; quality >= 0.5; quality -= 0.12) {
+        const imageData = canvas.toDataURL('image/jpeg', quality);
+        if (imageData.length * 0.75 <= 512 * 1024) return imageData;
+      }
+      throw new Error('Não foi possível reduzir a foto para o limite de 512 KB.');
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
   }
 
   function showToast(message) {
@@ -186,10 +245,45 @@
     });
     username.value = state.user.username;
     username.maxLength = 20;
+    let avatarData = state.user.avatarData || '';
+    const photoLabel = document.createElement('label');
+    photoLabel.textContent = 'Foto de perfil';
+    const photo = document.createElement('input');
+    photo.type = 'file';
+    photo.accept = 'image/jpeg,image/png,image/webp';
+    photo.setAttribute('aria-label', 'Escolher foto de perfil');
+    photoLabel.append(photo);
+    const photoPreview = document.createElement('div');
+    photoPreview.className = 'avatar profile-editor-avatar';
+    setAvatar(photoPreview, avatarData, state.user.displayName);
     const error = document.createElement('div');
     error.className = 'hint';
     error.setAttribute('role', 'alert');
     error.style.color = '#ff929e';
+    const removePhoto = document.createElement('button');
+    removePhoto.type = 'button';
+    removePhoto.className = 'secondary remove-avatar';
+    removePhoto.textContent = 'Remover foto';
+    removePhoto.disabled = !avatarData;
+    removePhoto.onclick = () => {
+      avatarData = '';
+      photo.value = '';
+      setAvatar(photoPreview, '', displayName.value);
+      removePhoto.disabled = true;
+    };
+    photo.onchange = async () => {
+      const file = photo.files?.[0];
+      if (!file) return;
+      try {
+        avatarData = await prepareProfilePhoto(file);
+        setAvatar(photoPreview, avatarData, displayName.value);
+        removePhoto.disabled = false;
+      } catch (requestError) {
+        photo.value = '';
+        error.textContent = requestError.message;
+      }
+    };
+    form.append(photoLabel, photoPreview, removePhoto);
     form.append(error);
 
     const footer = document.createElement('div');
@@ -234,11 +328,15 @@
       try {
         const result = await api('/api/me', {
           method: 'PATCH',
-          body: JSON.stringify(Object.fromEntries(new FormData(form))),
+          body: JSON.stringify({
+            ...Object.fromEntries(new FormData(form)),
+            avatarData,
+          }),
         });
         state.user = result.user;
         backdrop.remove();
         render();
+        await refreshData();
         showToast('Perfil atualizado.');
       } catch (requestError) {
         error.textContent = requestError.message;
@@ -257,6 +355,21 @@
 
   function renderList() {
     const query = document.getElementById('search').value.toLowerCase();
+    const renderKey = JSON.stringify([
+      query,
+      state.selectedId,
+      state.user?.username,
+      state.conversations.map(({ id, name, username, avatarUrl, members, lastMessage }) => ({
+        id,
+        name,
+        username,
+        avatarUrl,
+        members,
+        lastMessage,
+      })),
+    ]);
+    if (renderKey === state.conversationRenderKey) return;
+    state.conversationRenderKey = renderKey;
     list.replaceChildren();
     const conversations = state.conversations.filter(conversation =>
       `${conversation.name} ${conversation.username} ${conversation.lastMessage?.text || ''}`
@@ -277,7 +390,7 @@
       button.onclick = () => selectConversation(conversation.id);
       const avatar = document.createElement('div');
       avatar.className = 'avatar';
-      avatar.textContent = initials(conversation.name);
+      setAvatar(avatar, '', conversation.name, conversation.avatarUrl);
       const copy = document.createElement('div');
       copy.className = 'copy';
       const line = document.createElement('div');
@@ -539,14 +652,21 @@
     peer.onconnectionstatechange = () => {
       if (state.call !== call) return;
       if (peer.connectionState === 'connected') {
+        clearTimeout(call.disconnectTimeout);
         call.statusText = 'Conectado';
         updateCallStatus(call.statusText);
       } else if (peer.connectionState === 'failed') {
         finishCall();
-        showToast('Não foi possível conectar. Verifique a rede e tente novamente.');
+        showToast('A rede bloqueou a chamada. Para conectar entre redes diferentes, o backend precisa de um servidor TURN.');
       } else if (peer.connectionState === 'disconnected') {
         call.statusText = 'Reconectando…';
         updateCallStatus(call.statusText);
+        clearTimeout(call.disconnectTimeout);
+        call.disconnectTimeout = setTimeout(() => {
+          if (state.call !== call || peer.connectionState !== 'disconnected') return;
+          finishCall();
+          showToast('A conexão caiu. Confira a internet e tente novamente; redes restritivas podem exigir TURN.');
+        }, 12_000);
       }
     };
     return peer;
@@ -572,6 +692,11 @@
     }
     if (state.call) {
       showToast('Encerre a chamada atual antes de iniciar outra.');
+      return;
+    }
+    if (!window.isSecureContext
+      && !['localhost', '127.0.0.1'].includes(location.hostname)) {
+      showToast('Chamadas precisam de HTTPS para acessar câmera e microfone.');
       return;
     }
     if (!navigator.mediaDevices?.getUserMedia || !window.RTCPeerConnection) {
@@ -620,6 +745,10 @@
   async function acceptCall(call) {
     if (state.call !== call) return;
     try {
+      if (!window.isSecureContext
+        && !['localhost', '127.0.0.1'].includes(location.hostname)) {
+        throw new Error('Chamadas precisam de HTTPS para acessar câmera e microfone.');
+      }
       clearTimeout(call.timeout);
       const wantsVideo = Boolean(call.offerVideo);
       call.localStream = await navigator.mediaDevices.getUserMedia({
@@ -725,6 +854,7 @@
     if (!call) return;
     state.call = null;
     clearTimeout(call.timeout);
+    clearTimeout(call.disconnectTimeout);
     if (sendSignal) {
       try {
         await sendCallSignal(call, signalType);
@@ -815,18 +945,25 @@
     const messages = main.querySelector('.messages');
     if (!messages) return;
     const wasNearBottom = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 100;
-    messages.replaceChildren();
-    const day = document.createElement('div');
-    day.className = 'day';
-    day.textContent = state.messages.length ? 'HISTÓRICO DA CONVERSA' : 'Esta conversa começa aqui';
-    messages.append(day);
-    state.messages.forEach(message => {
+    const renderedCount = Number(messages.dataset.renderedCount || 0);
+    if (renderedCount === 0) {
+      const day = document.createElement('div');
+      day.className = 'day';
+      day.textContent = state.messages.length ? 'HISTÓRICO DA CONVERSA' : 'Esta conversa começa aqui';
+      messages.replaceChildren(day);
+    }
+    state.messages.slice(renderedCount).forEach((message, index) => {
       const mine = message.username.toLowerCase() === state.user.username.toLowerCase();
       const row = document.createElement('article');
-      row.className = `message${mine ? ' mine' : ''}`;
+      row.className = `message${mine ? ' mine' : ''}${renderedCount + index > 0 ? ' message-new' : ''}`;
       const avatar = document.createElement('div');
       avatar.className = 'avatar';
-      avatar.textContent = initials(mine ? state.user.displayName : message.displayName);
+      setAvatar(
+        avatar,
+        mine ? state.user.avatarData : '',
+        message.displayName,
+        message.avatarUrl,
+      );
       const box = document.createElement('div');
       box.className = 'bubblebox';
       const meta = document.createElement('div');
@@ -864,7 +1001,8 @@
       row.append(avatar, box);
       messages.append(row);
     });
-    messages.querySelectorAll('img').forEach(image => {
+    messages.dataset.renderedCount = String(state.messages.length);
+    messages.querySelectorAll('.message img').forEach(image => {
       image.onload = () => {
         if (messages.scrollHeight - messages.scrollTop - messages.clientHeight < 120) {
           messages.scrollTop = messages.scrollHeight;
@@ -894,7 +1032,7 @@
     back.onclick = () => app.classList.remove('chat-open');
     const avatar = document.createElement('div');
     avatar.className = 'avatar';
-    avatar.textContent = initials(conversation.name);
+    setAvatar(avatar, '', conversation.name, conversation.avatarUrl);
     const copy = document.createElement('div');
     copy.className = 'topcopy';
     const title = document.createElement('div');
@@ -1081,8 +1219,8 @@
   function render() {
     const name = state.user?.displayName || 'Visitante';
     document.getElementById('profileName').textContent = name;
-    document.getElementById('profileAvatar').textContent = initials(name);
-    document.getElementById('myAvatar').textContent = initials(name);
+    setAvatar(document.getElementById('profileAvatar'), state.user?.avatarData, name);
+    setAvatar(document.getElementById('myAvatar'), state.user?.avatarData, name);
     renderList();
     renderChat();
   }
