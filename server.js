@@ -594,8 +594,19 @@ function createServer({
       }
       const allowedTypes = new Set(['offer', 'answer', 'ice', 'hangup', 'decline', 'busy']);
       if (!allowedTypes.has(body.type)) throw new ApiError(400, 'Sinal de chamada inválido.');
-      if (body.type === 'ice' && (!body.payload || typeof body.payload.candidate !== 'string')) {
-        throw new ApiError(400, 'Candidato de conexão inválido.');
+      if (body.type === 'ice') {
+        const candidate = body.payload?.candidate;
+        if (!candidate || typeof candidate !== 'object'
+          || typeof candidate.candidate !== 'string' || !candidate.candidate
+          || candidate.candidate.length > MAX_SIGNAL_BYTES
+          || candidate.sdpMid !== undefined && candidate.sdpMid !== null
+            && typeof candidate.sdpMid !== 'string'
+          || candidate.sdpMLineIndex !== undefined && candidate.sdpMLineIndex !== null
+            && !Number.isInteger(candidate.sdpMLineIndex)
+          || candidate.usernameFragment !== undefined && candidate.usernameFragment !== null
+            && typeof candidate.usernameFragment !== 'string') {
+          throw new ApiError(400, 'Candidato de conexão inválido.');
+        }
       }
       if ((body.type === 'offer' || body.type === 'answer')
         && (!body.payload?.description || typeof body.payload.description.sdp !== 'string'
