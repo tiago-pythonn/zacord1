@@ -16,6 +16,8 @@ const SESSION_COOKIE = 'zacord_session';
 const SESSION_MAX_AGE = 7 * 24 * 60 * 60;
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+const MAX_PROFILE_IMAGE_BYTES = 512 * 1024;
+const MAX_PROFILE_BODY_BYTES = Math.ceil(MAX_PROFILE_IMAGE_BYTES * 4 / 3) + 1024;
 const MAX_CUSTOM_EMOJI_BYTES = 256 * 1024;
 const MAX_SIGNAL_BYTES = 64 * 1024;
 const USERNAME_PATTERN = /^[a-zA-Z0-9_]{3,20}$/;
@@ -43,16 +45,34 @@ class ApiError extends Error {
   }
 }
 
-function createServer({ dataFile = process.env.ZACORD_DATA_FILE || path.join(ROOT, 'data.json') } = {}) {
+function createServer({
+  dataFile = process.env.ZACORD_DATA_FILE || path.join(ROOT, 'data.json'),
+  fetchImpl = fetch,
+} = {}) {
   const sessions = new Map();
   const callSignals = [];
   const signalRates = new Map();
+  const turnCredentialsUrl = process.env.ZACORD_TURN_CREDENTIALS_URL || '';
+  let fetchedIceServers;
+  let fetchedIceServersExpiresAt = 0;
   const allowedOrigins = (process.env.ZACORD_ALLOWED_ORIGINS || '')
     .split(',')
     .map(origin => origin.trim())
     .filter(Boolean);
   let iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
   let store;
+
+  if (turnCredentialsUrl) {
+    let parsed;
+    try {
+      parsed = new URL(turnCredentialsUrl);
+    } catch {
+      throw new Error('ZACORD_TURN_CREDENTIALS_URL precisa ser uma URL HTTPS válida.');
+    }
+    if (parsed.protocol !== 'https:') {
+      throw new Error('ZACORD_TURN_CREDENTIALS_URL precisa usar HTTPS.');
+    }
+  }
 
   for (const origin of allowedOrigins) {
     let parsed;
@@ -89,6 +109,32 @@ function createServer({ dataFile = process.env.ZACORD_DATA_FILE || path.join(ROO
     } catch (error) {
       throw new Error(`ZACORD_ICE_SERVERS inválido: ${error.message}`);
     }
+  }
+
+  async function getIceServers() {
+    if (!turnCredentialsUrl) return iceServers;
+    if (fetchedIceServers && fetchedIceServersExpiresAt > Date.now()) return fetchedIceServers;
+
+    let response;
+    let servers;
+    try {
+      response = await fetchImpl(turnCredentialsUrl, { signal: AbortSignal.timeout(10_000) });
+      if (!response.ok) throw new Error(`TURN provider returned ${response.status}.`);
+      servers = await response.json();
+    } catch {
+      throw new ApiError(502, 'Não foi possível obter servidores TURN. Confira a configuração do backend.');
+    }
+
+    if (!Array.isArray(servers) || servers.length === 0
+      || servers.some(server => !server || typeof server.urls !== 'string'
+        && (!Array.isArray(server.urls) || server.urls.some(url => typeof url !== 'string')))
+      || !servers.some(server => (Array.isArray(server.urls) ? server.urls : [server.urls])
+        .some(url => /^turns?:/i.test(url)))) {
+      throw new ApiError(502, 'O provedor não retornou servidores TURN válidos.');
+    }
+    fetchedIceServers = servers;
+    fetchedIceServersExpiresAt = Date.now() + 5 * 60 * 1000;
+    return fetchedIceServers;
   }
 
   try {
@@ -200,7 +246,12 @@ function createServer({ dataFile = process.env.ZACORD_DATA_FILE || path.join(ROO
   }
 
   function safeUser(user) {
-    return { id: user.id, username: user.username, displayName: user.displayName };
+    return {
+      id: user.id,
+      username: user.username,
+      displayName: user.displayName,
+      avatarData: user.avatarData || '',
+    };
   }
 
   function createSession(user, request, response) {
@@ -245,6 +296,9 @@ function createServer({ dataFile = process.env.ZACORD_DATA_FILE || path.join(ROO
       isGroup: conversation.isGroup,
       name: conversation.isGroup ? conversation.name : otherUser.displayName,
       username: otherUser?.username || '',
+      avatarUrl: otherUser?.avatarData
+        ? `/api/users/${otherUser.id}/avatar?v=${encodeURIComponent(otherUser.avatarRevision || '0')}`
+        : '',
       members: conversation.participants.length,
       lastMessage: lastMessage ? {
         text: lastMessage.type === 'image' ? '📷 Foto'
@@ -324,9 +378,44 @@ function createServer({ dataFile = process.env.ZACORD_DATA_FILE || path.join(ROO
       return;
     }
 
+    const avatarMatch = pathname.match(/^\/api\/users\/([a-f0-9-]+)\/avatar$/i);
+    if (method === 'GET' && avatarMatch) {
+      const requester = requireUser(request);
+      const profile = store.users.find(item => item.id === avatarMatch[1]);
+      const canView = profile && (profile.id === requester.id
+        || store.conversations.some(conversation =>
+          conversation.participants.includes(requester.id)
+          && conversation.participants.includes(profile.id)));
+      if (!canView || !profile.avatarData) {
+        throw new ApiError(404, 'Foto de perfil não encontrada.');
+      }
+      const match = profile.avatarData.match(/^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/]+={0,2})$/);
+      if (!match) throw new Error('A foto de perfil salva está inválida.');
+      const image = Buffer.from(match[2], 'base64');
+      const etag = `"${profile.id}-${profile.avatarRevision || '0'}"`;
+      if (request.headers['if-none-match'] === etag) {
+        response.writeHead(304, {
+          'Cache-Control': 'private, max-age=300',
+          ETag: etag,
+          'X-Content-Type-Options': 'nosniff',
+        });
+        response.end();
+        return;
+      }
+      response.writeHead(200, {
+        'Cache-Control': 'private, max-age=300',
+        'Content-Length': image.length,
+        'Content-Type': `image/${match[1]}`,
+        ETag: etag,
+        'X-Content-Type-Options': 'nosniff',
+      });
+      response.end(image);
+      return;
+    }
+
     if (method === 'GET' && pathname === '/api/config') {
       requireUser(request);
-      sendJson(response, 200, { iceServers });
+      sendJson(response, 200, { iceServers: await getIceServers() });
       return;
     }
 
@@ -371,7 +460,7 @@ function createServer({ dataFile = process.env.ZACORD_DATA_FILE || path.join(ROO
 
     if (method === 'PATCH' && pathname === '/api/me') {
       const user = requireUser(request);
-      const body = await readJson(request);
+      const body = await readJson(request, MAX_PROFILE_BODY_BYTES);
       const username = validateUsername(body.username);
       const displayName = typeof body.displayName === 'string'
         ? body.displayName.trim().slice(0, 40)
@@ -381,8 +470,29 @@ function createServer({ dataFile = process.env.ZACORD_DATA_FILE || path.join(ROO
         && item.username.toLowerCase() === username.toLowerCase())) {
         throw new ApiError(409, 'Esse username já está em uso.');
       }
+      let avatarData = user.avatarData;
+      if (body.avatarData !== undefined) {
+        if (body.avatarData === '') {
+          avatarData = undefined;
+        } else {
+          const match = typeof body.avatarData === 'string'
+            && body.avatarData.match(/^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/]+={0,2})$/);
+          if (!match) {
+            throw new ApiError(400, 'Escolha uma foto JPEG, PNG ou WebP válida.');
+          }
+          const imageBytes = Buffer.from(match[2], 'base64');
+          if (imageBytes.length > MAX_PROFILE_IMAGE_BYTES
+            || imageBytes.toString('base64') !== match[2]) {
+            throw new ApiError(413, 'A foto de perfil deve ter no máximo 512 KB.');
+          }
+          avatarData = body.avatarData;
+        }
+      }
       user.username = username;
       user.displayName = displayName;
+      if (avatarData) user.avatarData = avatarData;
+      else delete user.avatarData;
+      if (body.avatarData !== undefined) user.avatarRevision = randomUUID();
       persist();
       sendJson(response, 200, { user: safeUser(user) });
       return;
@@ -531,6 +641,9 @@ function createServer({ dataFile = process.env.ZACORD_DATA_FILE || path.join(ROO
           text: message.text,
           username: sender?.username || '',
           displayName: sender?.displayName || 'Usuário',
+          avatarUrl: sender?.avatarData
+            ? `/api/users/${sender.id}/avatar?v=${encodeURIComponent(sender.avatarRevision || '0')}`
+            : '',
           type: message.type || 'text',
           time: message.time,
           ...(message.type === 'image' ? { imageData: message.imageData } : {}),
