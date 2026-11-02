@@ -1541,6 +1541,7 @@
         call.pendingRemoteIce.push(signal.payload.candidate);
       }
     } else if (signal.type === 'answer' && call.status === 'outgoing') {
+      clearTimeout(call.timeout);
       await call.peerConnection.setRemoteDescription(signal.payload.description);
       call.status = 'connecting';
       call.statusText = 'Conectando…';
