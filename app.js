@@ -540,11 +540,43 @@
     if (status) status.textContent = text;
   }
 
+  async function toggleCallFullscreen(call, button) {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await call.card.requestFullscreen();
+      }
+    } catch (error) {
+      showToast(`Não foi possível abrir a chamada em tela cheia: ${error.message}`);
+    }
+    if (call.fullscreenChangeHandler) call.fullscreenChangeHandler();
+  }
+
+  function updateFullscreenButton(call, button) {
+    const isFullscreen = document.fullscreenElement === call.card;
+    button.textContent = isFullscreen ? '⤢' : '⛶';
+    button.title = isFullscreen ? 'Sair da tela cheia (Esc)' : 'Tela cheia (F11)';
+    button.setAttribute('aria-label', button.title);
+  }
+
+  function playRemoteAudio(call) {
+    if (!call.remoteAudio?.srcObject) return;
+    call.remoteAudio.play().then(() => {
+      call.audioPlaybackBlocked = false;
+      call.controls?.enableAudio?.classList.remove('audio-needed');
+    }).catch(() => {
+      call.audioPlaybackBlocked = true;
+      call.controls?.enableAudio?.classList.add('audio-needed');
+    });
+  }
+
   function renderCallPanel(call) {
     const backdrop = document.createElement('div');
     backdrop.className = 'modalback callback';
     const card = document.createElement('section');
     card.className = 'modal call-card';
+    call.card = card;
     const heading = document.createElement('header');
     heading.className = 'call-heading';
     const title = document.createElement('h2');
@@ -562,20 +594,34 @@
       remote.className = 'remote-video';
       remote.autoplay = true;
       remote.playsInline = true;
+      remote.muted = true;
+      const remoteAudio = document.createElement('audio');
+      remoteAudio.autoplay = true;
+      remoteAudio.setAttribute('playsinline', '');
       const local = document.createElement('video');
       local.className = 'local-video';
       local.autoplay = true;
       local.playsInline = true;
       local.muted = true;
-      videos.append(remote, local);
+      videos.append(remote, remoteAudio, local);
       call.remoteVideo = remote;
+      call.remoteAudio = remoteAudio;
       call.localVideo = local;
-      if (call.remoteStream) remote.srcObject = call.remoteStream;
+      if (call.remoteStream) {
+        remote.srcObject = new MediaStream(call.remoteStream.getVideoTracks());
+        remoteAudio.srcObject = new MediaStream(call.remoteStream.getAudioTracks());
+      }
       if (call.localStream) local.srcObject = call.localStream;
       card.append(videos);
 
       const controls = document.createElement('div');
       controls.className = 'call-controls';
+      const enableAudio = document.createElement('button');
+      enableAudio.type = 'button';
+      enableAudio.textContent = '🔊';
+      enableAudio.title = 'Ativar áudio recebido';
+      enableAudio.setAttribute('aria-label', enableAudio.title);
+      enableAudio.onclick = () => playRemoteAudio(call);
       const mic = document.createElement('button');
       mic.type = 'button';
       mic.textContent = '🎙';
@@ -599,6 +645,24 @@
       share.title = 'Compartilhar tela';
       share.setAttribute('aria-label', share.title);
       share.onclick = () => toggleScreenShare(call, share);
+      const enlarge = document.createElement('button');
+      enlarge.type = 'button';
+      enlarge.textContent = '⤢';
+      enlarge.title = 'Aumentar ou diminuir o vídeo';
+      enlarge.setAttribute('aria-label', enlarge.title);
+      enlarge.onclick = () => {
+        videos.classList.toggle('video-expanded');
+        enlarge.classList.toggle('active', videos.classList.contains('video-expanded'));
+      };
+      const fullscreen = document.createElement('button');
+      fullscreen.type = 'button';
+      fullscreen.textContent = '⛶';
+      fullscreen.title = 'Tela cheia (F11)';
+      fullscreen.setAttribute('aria-label', fullscreen.title);
+      fullscreen.onclick = () => toggleCallFullscreen(call, fullscreen);
+      call.fullscreenButton = fullscreen;
+      call.fullscreenChangeHandler = () => updateFullscreenButton(call, fullscreen);
+      document.addEventListener('fullscreenchange', call.fullscreenChangeHandler);
       const end = document.createElement('button');
       end.type = 'button';
       end.className = 'end-call';
@@ -606,9 +670,10 @@
       end.title = 'Encerrar chamada';
       end.setAttribute('aria-label', end.title);
       end.onclick = () => finishCall({ sendSignal: true });
-      controls.append(mic, camera, share, end);
+      controls.append(enableAudio, mic, camera, share, enlarge, fullscreen, end);
       card.append(controls);
-      call.controls = { mic, camera, share };
+      call.controls = { enableAudio, mic, camera, share, enlarge, fullscreen };
+      if (call.remoteAudio) playRemoteAudio(call);
     } else {
       const incoming = document.createElement('div');
       incoming.className = 'call-incoming';
@@ -646,8 +711,26 @@
         .catch(error => showToast(`Falha na conexão: ${error.message}`));
     };
     peer.ontrack = event => {
-      call.remoteStream = event.streams[0] || new MediaStream([event.track]);
-      if (call.remoteVideo) call.remoteVideo.srcObject = call.remoteStream;
+      call.remoteStream ||= new MediaStream();
+      if (!call.remoteStream.getTracks().some(track => track.id === event.track.id)) {
+        call.remoteStream.addTrack(event.track);
+      }
+      if (event.track.kind === 'video' && call.remoteVideo) {
+        call.remoteVideo.srcObject = new MediaStream([event.track]);
+      }
+      if (event.track.kind === 'audio' && call.remoteAudio) {
+        call.remoteAudio.srcObject = new MediaStream([event.track]);
+        playRemoteAudio(call);
+      }
+      event.track.onunmute = () => {
+        if (event.track.kind === 'audio') playRemoteAudio(call);
+      };
+      event.track.onended = () => {
+        call.statusText = event.track.kind === 'video'
+          ? 'A outra câmera foi desligada.'
+          : 'O áudio da outra pessoa foi desconectado.';
+        updateCallStatus(call.statusText);
+      };
     };
     peer.onconnectionstatechange = () => {
       if (state.call !== call) return;
@@ -704,7 +787,15 @@
       return;
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video });
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video });
+      } catch (error) {
+        if (!video || error.name !== 'NotFoundError' && error.name !== 'NotAllowedError'
+          && error.name !== 'OverconstrainedError') throw error;
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        showToast('A câmera não foi liberada ou não foi encontrada. A chamada continuará só com áudio.');
+      }
       const call = {
         conversation,
         peerUsername: conversation.username,
@@ -733,7 +824,10 @@
       renderCallPanel(call);
       const offer = await peer.createOffer();
       await peer.setLocalDescription(offer);
-      await sendCallSignal(call, 'offer', { description: peer.localDescription, video });
+      await sendCallSignal(call, 'offer', {
+        description: peer.localDescription,
+        video: Boolean(stream.getVideoTracks().length),
+      });
       call.signalReady = true;
       await flushLocalIce(call);
     } catch (error) {
@@ -751,10 +845,17 @@
       }
       clearTimeout(call.timeout);
       const wantsVideo = Boolean(call.offerVideo);
-      call.localStream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: wantsVideo,
-      });
+      try {
+        call.localStream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: wantsVideo,
+        });
+      } catch (error) {
+        if (!wantsVideo || error.name !== 'NotFoundError' && error.name !== 'NotAllowedError'
+          && error.name !== 'OverconstrainedError') throw error;
+        call.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        showToast('A câmera não foi liberada ou não foi encontrada. A chamada continuará só com áudio.');
+      }
       call.status = 'connecting';
       call.statusText = 'Conectando…';
       const peer = createPeerConnection(call);
@@ -861,6 +962,16 @@
       } catch (error) {
         showToast(`Não foi possível avisar o outro usuário: ${error.message}`);
       }
+    }
+    if (document.fullscreenElement === call.card) {
+      try {
+        await document.exitFullscreen();
+      } catch (error) {
+        console.error('Não foi possível sair da tela cheia da chamada:', error);
+      }
+    }
+    if (call.fullscreenChangeHandler) {
+      document.removeEventListener('fullscreenchange', call.fullscreenChangeHandler);
     }
     call.peerConnection?.close();
     if (call.audioContext) await call.audioContext.close();
