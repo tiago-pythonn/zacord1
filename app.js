@@ -535,6 +535,27 @@
     });
   }
 
+  async function sendGroupSignal(call, peer, type, payload = {}) {
+    await api('/api/calls/signals', {
+      method: 'POST',
+      body: JSON.stringify({
+        conversationId: call.conversation.id,
+        toUsername: peer.username,
+        type: `group-${type}`,
+        payload,
+      }),
+    });
+  }
+
+  function groupCallStatus(call) {
+    const connected = [...call.peers.values()]
+      .filter(peer => peer.peerConnection?.connectionState === 'connected').length;
+    call.statusText = connected
+      ? `Em grupo · ${connected + 1} pessoa${connected ? 's' : ''} conectada${connected ? 's' : ''}`
+      : 'Aguardando outras pessoas…';
+    updateCallStatus(call.statusText);
+  }
+
   function updateCallStatus(text) {
     const status = overlay.querySelector('.call-status');
     if (status) status.textContent = text;
@@ -572,6 +593,10 @@
   }
 
   function renderCallPanel(call) {
+    if (call.group) {
+      renderGroupCallPanel(call);
+      return;
+    }
     const backdrop = document.createElement('div');
     backdrop.className = 'modalback callback';
     const card = document.createElement('section');
@@ -625,19 +650,30 @@
       const mic = document.createElement('button');
       mic.type = 'button';
       mic.textContent = '🎙';
-      mic.title = 'Silenciar ou ativar microfone';
+      mic.title = call.localStream?.getAudioTracks()[0]?.enabled
+        ? 'Microfone ligado — clique para silenciar'
+        : 'Microfone desligado — clique para ativar';
       mic.setAttribute('aria-label', mic.title);
+      mic.classList.toggle('muted', !call.localStream?.getAudioTracks()[0]?.enabled);
       mic.onclick = () => {
         const track = call.localStream?.getAudioTracks()[0];
-        if (!track) return;
+        if (!track) {
+          showToast('Microfone indisponível. Confira a permissão e o dispositivo de áudio.');
+          return;
+        }
         track.enabled = !track.enabled;
-        mic.classList.toggle('active', !track.enabled);
+        mic.classList.toggle('muted', !track.enabled);
+        mic.title = track.enabled
+          ? 'Microfone ligado — clique para silenciar'
+          : 'Microfone desligado — clique para ativar';
+        mic.setAttribute('aria-label', mic.title);
       };
       const camera = document.createElement('button');
       camera.type = 'button';
       camera.textContent = '▣';
       camera.title = 'Ativar ou desligar câmera';
       camera.setAttribute('aria-label', camera.title);
+      camera.classList.toggle('active', Boolean(call.localStream?.getVideoTracks()[0]?.enabled));
       camera.onclick = () => toggleCamera(call, camera);
       const share = document.createElement('button');
       share.type = 'button';
@@ -693,6 +729,432 @@
 
     backdrop.append(card);
     overlay.replaceChildren(backdrop);
+  }
+
+  function renderGroupCallPanel(call) {
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modalback callback';
+    const card = document.createElement('section');
+    card.className = 'modal call-card group-call-card';
+    call.card = card;
+    const heading = document.createElement('header');
+    heading.className = 'call-heading';
+    const title = document.createElement('h2');
+    title.textContent = call.conversation.name;
+    const status = document.createElement('p');
+    status.className = 'call-status';
+    status.textContent = call.statusText;
+    heading.append(title, status);
+    card.append(heading);
+
+    if (call.status === 'incoming') {
+      const incoming = document.createElement('div');
+      incoming.className = 'call-incoming';
+      const accept = document.createElement('button');
+      accept.type = 'button';
+      accept.className = 'primary';
+      accept.textContent = 'Entrar na chamada';
+      accept.onclick = () => acceptCall(call);
+      const reject = document.createElement('button');
+      reject.type = 'button';
+      reject.className = 'secondary reject-call';
+      reject.textContent = 'Agora não';
+      reject.onclick = () => finishCall();
+      incoming.append(accept, reject);
+      card.append(incoming);
+    } else {
+      const grid = document.createElement('div');
+      grid.className = 'group-call-grid';
+      call.grid = grid;
+      const localTile = document.createElement('article');
+      localTile.className = 'group-call-tile local-tile';
+      const local = document.createElement('video');
+      local.autoplay = true;
+      local.playsInline = true;
+      local.muted = true;
+      local.className = 'local-video';
+      const localName = document.createElement('span');
+      localName.textContent = `${state.user.displayName} (você)`;
+      localTile.append(local, localName);
+      grid.append(localTile);
+      call.localVideo = local;
+      if (call.localStream) local.srcObject = call.localStream;
+      card.append(grid);
+      for (const peer of call.peers.values()) renderGroupPeerTile(call, peer);
+
+      const controls = document.createElement('div');
+      controls.className = 'call-controls';
+      const enableAudio = document.createElement('button');
+      enableAudio.type = 'button';
+      enableAudio.textContent = '🔊';
+      enableAudio.title = 'Ativar áudio recebido';
+      enableAudio.setAttribute('aria-label', enableAudio.title);
+      enableAudio.onclick = () => {
+        for (const peer of call.peers.values()) {
+          peer.remoteAudio?.play().catch(() => {
+            showToast('O navegador não conseguiu reproduzir o áudio.');
+          });
+        }
+      };
+      const mic = document.createElement('button');
+      mic.type = 'button';
+      mic.textContent = '🎙';
+      mic.title = call.localStream?.getAudioTracks()[0]?.enabled
+        ? 'Microfone ligado — clique para silenciar'
+        : 'Microfone desligado — clique para ativar';
+      mic.setAttribute('aria-label', mic.title);
+      mic.classList.toggle('muted', !call.localStream?.getAudioTracks()[0]?.enabled);
+      mic.onclick = () => {
+        const track = call.localStream?.getAudioTracks()[0];
+        if (!track) {
+          showToast('Microfone indisponível. Confira a permissão e o dispositivo de áudio.');
+          return;
+        }
+        track.enabled = !track.enabled;
+        mic.classList.toggle('muted', !track.enabled);
+        mic.title = track.enabled
+          ? 'Microfone ligado — clique para silenciar'
+          : 'Microfone desligado — clique para ativar';
+        mic.setAttribute('aria-label', mic.title);
+      };
+      const camera = document.createElement('button');
+      camera.type = 'button';
+      camera.textContent = '▣';
+      camera.title = 'Ativar ou desligar câmera';
+      camera.setAttribute('aria-label', camera.title);
+      camera.classList.toggle('active', Boolean(call.localStream?.getVideoTracks()[0]?.enabled));
+      camera.onclick = () => toggleCamera(call, camera);
+      const share = document.createElement('button');
+      share.type = 'button';
+      share.textContent = '▤';
+      share.title = 'Compartilhar tela';
+      share.setAttribute('aria-label', share.title);
+      share.onclick = () => toggleScreenShare(call, share);
+      const fullscreen = document.createElement('button');
+      fullscreen.type = 'button';
+      fullscreen.textContent = '⛶';
+      fullscreen.title = 'Tela cheia';
+      fullscreen.setAttribute('aria-label', fullscreen.title);
+      fullscreen.onclick = () => toggleCallFullscreen(call, fullscreen);
+      call.fullscreenButton = fullscreen;
+      call.fullscreenChangeHandler = () => updateFullscreenButton(call, fullscreen);
+      document.addEventListener('fullscreenchange', call.fullscreenChangeHandler);
+      const end = document.createElement('button');
+      end.type = 'button';
+      end.className = 'end-call';
+      end.textContent = '☎';
+      end.title = 'Sair da chamada em grupo';
+      end.setAttribute('aria-label', end.title);
+      end.onclick = () => finishCall({ sendSignal: true });
+      controls.append(enableAudio, mic, camera, share, fullscreen, end);
+      card.append(controls);
+      call.controls = { enableAudio, mic, camera, share, fullscreen };
+    }
+    backdrop.append(card);
+    overlay.replaceChildren(backdrop);
+  }
+
+  function renderGroupPeerTile(call, peer) {
+    if (!call.grid || peer.tile) return;
+    const tile = document.createElement('article');
+    tile.className = 'group-call-tile';
+    const video = document.createElement('video');
+    video.autoplay = true;
+    video.playsInline = true;
+    video.muted = true;
+    const audio = document.createElement('audio');
+    audio.autoplay = true;
+    audio.setAttribute('playsinline', '');
+    const name = document.createElement('span');
+    name.textContent = peer.displayName;
+    tile.append(video, audio, name);
+    call.grid.append(tile);
+    peer.tile = tile;
+    peer.remoteVideo = video;
+    peer.remoteAudio = audio;
+    if (peer.remoteStream) {
+      video.srcObject = new MediaStream(peer.remoteStream.getVideoTracks());
+      audio.srcObject = new MediaStream(peer.remoteStream.getAudioTracks());
+      audio.play().catch(() => {
+        showToast(`Toque no áudio da chamada para ouvir ${peer.displayName}.`);
+      });
+    }
+  }
+
+  function createGroupPeer(call, username, displayName) {
+    const key = username.toLowerCase();
+    const existing = call.peers.get(key);
+    if (existing) return existing;
+    const peer = {
+      username,
+      displayName,
+      pendingLocalIce: [],
+      pendingRemoteIce: [],
+      remoteStream: new MediaStream(),
+      signalReady: false,
+    };
+    const connection = new RTCPeerConnection({ iceServers: state.iceServers });
+    peer.peerConnection = connection;
+    const audioTrack = call.sharedAudioStream?.getAudioTracks()[0]
+      || call.localStream?.getAudioTracks()[0];
+    if (audioTrack) {
+      const audioStream = call.sharedAudioStream?.getTracks().includes(audioTrack)
+        ? call.sharedAudioStream
+        : call.localStream;
+      peer.audioSender = connection.addTrack(audioTrack, audioStream);
+    }
+    const videoTransceiver = connection.addTransceiver('video', { direction: 'sendrecv' });
+    peer.videoSender = videoTransceiver.sender;
+    const videoTrack = call.displayStream?.getVideoTracks()[0]
+      || call.localStream?.getVideoTracks()[0];
+    if (videoTrack) peer.videoSender.replaceTrack(videoTrack).catch(error => {
+      showToast(`Não foi possível enviar vídeo para ${displayName}: ${error.message}`);
+    });
+    connection.onicecandidate = event => {
+      if (!event.candidate) return;
+      const candidate = event.candidate.toJSON();
+      if (!peer.signalReady) {
+        peer.pendingLocalIce.push(candidate);
+        return;
+      }
+      sendGroupSignal(call, peer, 'ice', { candidate })
+        .catch(error => showToast(`Falha na conexão com ${displayName}: ${error.message}`));
+    };
+    connection.ontrack = event => {
+      if (!peer.remoteStream.getTracks().some(track => track.id === event.track.id)) {
+        peer.remoteStream.addTrack(event.track);
+      }
+      renderGroupPeerTile(call, peer);
+      if (event.track.kind === 'video' && peer.remoteVideo) {
+        peer.remoteVideo.srcObject = new MediaStream([event.track]);
+      }
+      if (event.track.kind === 'audio' && peer.remoteAudio) {
+        peer.remoteAudio.srcObject = new MediaStream([event.track]);
+        peer.remoteAudio.play().catch(() => {
+          showToast(`Clique na página para permitir o áudio de ${displayName}.`);
+        });
+      }
+    };
+    connection.onconnectionstatechange = () => {
+      if (state.call !== call) return;
+      if (connection.connectionState === 'failed') {
+        removeGroupPeer(call, key);
+        showToast(`Não foi possível conectar com ${displayName}. Confira a rede e o TURN.`);
+      } else {
+        groupCallStatus(call);
+      }
+    };
+    call.peers.set(key, peer);
+    renderGroupPeerTile(call, peer);
+    return peer;
+  }
+
+  async function flushGroupIce(peer) {
+    for (const candidate of peer.pendingLocalIce.splice(0)) {
+      const call = state.call;
+      if (!call?.group) return;
+      await sendGroupSignal(call, peer, 'ice', { candidate });
+    }
+  }
+
+  async function flushGroupRemoteIce(peer) {
+    if (!peer.peerConnection.remoteDescription) return;
+    for (const candidate of peer.pendingRemoteIce.splice(0)) {
+      await peer.peerConnection.addIceCandidate(candidate);
+    }
+  }
+
+  async function offerGroupPeer(call, username, displayName) {
+    const peer = createGroupPeer(call, username, displayName);
+    if (peer.offerStarted) return;
+    peer.offerStarted = true;
+    try {
+      const offer = await peer.peerConnection.createOffer();
+      await peer.peerConnection.setLocalDescription(offer);
+      await sendGroupSignal(call, peer, 'offer', {
+        description: peer.peerConnection.localDescription,
+      });
+      peer.signalReady = true;
+      await flushGroupIce(peer);
+    } catch (error) {
+      removeGroupPeer(call, username.toLowerCase());
+      showToast(`Não foi possível chamar ${displayName}: ${error.message}`);
+    }
+  }
+
+  function removeGroupPeer(call, key) {
+    const peer = call.peers.get(key);
+    if (!peer) return;
+    peer.peerConnection.close();
+    peer.tile?.remove();
+    call.peers.delete(key);
+    groupCallStatus(call);
+  }
+
+  async function startGroupCall(conversation, video) {
+    if (state.call) {
+      showToast('Encerre a chamada atual antes de iniciar outra.');
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || !window.RTCPeerConnection) {
+      showToast('Este navegador não oferece suporte a chamadas de áudio e vídeo.');
+      return;
+    }
+    if (!window.isSecureContext && !['localhost', '127.0.0.1'].includes(location.hostname)) {
+      showToast('Chamadas precisam de HTTPS para acessar câmera e microfone.');
+      return;
+    }
+    try {
+      let localStream;
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video });
+      } catch (error) {
+        if (!video || !['NotFoundError', 'NotAllowedError', 'OverconstrainedError'].includes(error.name)) {
+          throw error;
+        }
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        showToast('A câmera não está disponível. A chamada em grupo seguirá apenas com áudio.');
+      }
+      const call = {
+        group: true,
+        conversation,
+        status: 'connecting',
+        statusText: 'Entrando na chamada…',
+        localStream,
+        peers: new Map(),
+        video,
+      };
+      state.call = call;
+      renderCallPanel(call);
+      const { participants } = await api('/api/calls/groups/join', {
+        method: 'POST',
+        body: JSON.stringify({ conversationId: conversation.id, video: Boolean(localStream.getVideoTracks().length) }),
+      });
+      call.joined = true;
+      call.statusText = 'Aguardando outras pessoas…';
+      updateCallStatus(call.statusText);
+      for (const participant of participants) {
+        if (state.user.username.toLowerCase() < participant.username.toLowerCase()) {
+          await offerGroupPeer(call, participant.username, participant.displayName);
+        } else {
+          createGroupPeer(call, participant.username, participant.displayName);
+        }
+      }
+    } catch (error) {
+      await finishCall();
+      showToast(`Não foi possível iniciar a chamada em grupo: ${error.message}`);
+    }
+  }
+
+  async function acceptGroupCall(call) {
+    if (state.call !== call) return;
+    if (!navigator.mediaDevices?.getUserMedia || !window.RTCPeerConnection) {
+      showToast('Este navegador não oferece suporte a chamadas de áudio e vídeo.');
+      return;
+    }
+    if (!window.isSecureContext && !['localhost', '127.0.0.1'].includes(location.hostname)) {
+      showToast('Chamadas precisam de HTTPS para acessar câmera e microfone.');
+      return;
+    }
+    try {
+      let localStream;
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: Boolean(call.video),
+        });
+      } catch (error) {
+        if (!call.video || !['NotFoundError', 'NotAllowedError', 'OverconstrainedError'].includes(error.name)) {
+          throw error;
+        }
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        showToast('A câmera não está disponível. A chamada em grupo seguirá apenas com áudio.');
+      }
+      call.localStream = localStream;
+      call.status = 'connecting';
+      call.statusText = 'Entrando na chamada…';
+      renderCallPanel(call);
+      const { participants } = await api('/api/calls/groups/join', {
+        method: 'POST',
+        body: JSON.stringify({
+          conversationId: call.conversation.id,
+          video: Boolean(localStream.getVideoTracks().length),
+        }),
+      });
+      call.joined = true;
+      for (const participant of participants) {
+        if (state.user.username.toLowerCase() < participant.username.toLowerCase()) {
+          await offerGroupPeer(call, participant.username, participant.displayName);
+        } else {
+          createGroupPeer(call, participant.username, participant.displayName);
+        }
+      }
+      groupCallStatus(call);
+    } catch (error) {
+      await finishCall();
+      showToast(`Não foi possível entrar na chamada em grupo: ${error.message}`);
+    }
+  }
+
+  async function processGroupSignal(signal, conversation) {
+    if (signal.type === 'group-call-invite') {
+      if (state.call) return;
+      const call = {
+        group: true,
+        conversation,
+        inviterUsername: signal.fromUsername,
+        status: 'incoming',
+        statusText: `${signal.fromDisplayName} iniciou uma chamada em grupo`,
+        peers: new Map(),
+        video: Boolean(signal.payload.video),
+      };
+      state.call = call;
+      renderCallPanel(call);
+      return;
+    }
+    const call = state.call;
+    if (!call?.group || call.conversation.id !== signal.conversationId) return;
+    const key = signal.fromUsername.toLowerCase();
+    if (signal.type === 'group-peer-left' || signal.type === 'group-hangup') {
+      removeGroupPeer(call, key);
+      return;
+    }
+    if (signal.type === 'group-peer-joined') {
+      if (call.status === 'incoming') return;
+      if (state.user.username.toLowerCase() < key) {
+        await offerGroupPeer(call, signal.fromUsername, signal.fromDisplayName);
+      } else {
+        createGroupPeer(call, signal.fromUsername, signal.fromDisplayName);
+      }
+      return;
+    }
+    if (signal.type === 'group-offer') {
+      if (call.status === 'incoming') return;
+      const peer = createGroupPeer(call, signal.fromUsername, signal.fromDisplayName);
+      await peer.peerConnection.setRemoteDescription(signal.payload.description);
+      await flushGroupRemoteIce(peer);
+      const answer = await peer.peerConnection.createAnswer();
+      await peer.peerConnection.setLocalDescription(answer);
+      await sendGroupSignal(call, peer, 'answer', {
+        description: peer.peerConnection.localDescription,
+      });
+      peer.signalReady = true;
+      await flushGroupIce(peer);
+      return;
+    }
+    const peer = call.peers.get(key);
+    if (!peer) return;
+    if (signal.type === 'group-answer') {
+      await peer.peerConnection.setRemoteDescription(signal.payload.description);
+      peer.signalReady = true;
+      await flushGroupRemoteIce(peer);
+    } else if (signal.type === 'group-ice') {
+      if (peer.peerConnection.remoteDescription) {
+        await peer.peerConnection.addIceCandidate(signal.payload.candidate);
+      } else {
+        peer.pendingRemoteIce.push(signal.payload.candidate);
+      }
+    }
   }
 
   function createPeerConnection(call) {
@@ -770,7 +1232,7 @@
 
   async function startCall(conversation, video) {
     if (conversation.isGroup) {
-      showToast('Chamadas em grupo ainda não estão disponíveis.');
+      await startGroupCall(conversation, video);
       return;
     }
     if (state.call) {
@@ -838,6 +1300,10 @@
 
   async function acceptCall(call) {
     if (state.call !== call) return;
+    if (call.group) {
+      await acceptGroupCall(call);
+      return;
+    }
     try {
       if (!window.isSecureContext
         && !['localhost', '127.0.0.1'].includes(location.hostname)) {
@@ -882,6 +1348,26 @@
     }
   }
 
+  function callVideoSenders(call) {
+    return call.group
+      ? [...call.peers.values()].map(peer => peer.videoSender).filter(Boolean)
+      : call.videoSender ? [call.videoSender] : [];
+  }
+
+  function callAudioSenders(call) {
+    return call.group
+      ? [...call.peers.values()].map(peer => peer.audioSender).filter(Boolean)
+      : call.audioSender ? [call.audioSender] : [];
+  }
+
+  async function replaceCallVideoTrack(call, track) {
+    await Promise.all(callVideoSenders(call).map(sender => sender.replaceTrack(track)));
+  }
+
+  async function replaceCallAudioTrack(call, track) {
+    await Promise.all(callAudioSenders(call).map(sender => sender.replaceTrack(track)));
+  }
+
   async function toggleCamera(call, button) {
     try {
       let track = call.localStream.getVideoTracks()[0];
@@ -890,11 +1376,13 @@
         track = stream.getVideoTracks()[0];
         call.localStream.addTrack(track);
         if (call.localVideo) call.localVideo.srcObject = call.localStream;
-        await call.videoSender.replaceTrack(track);
+        await replaceCallVideoTrack(call, track);
       } else {
         track.enabled = !track.enabled;
       }
       button.classList.toggle('active', track.enabled);
+      button.title = track.enabled ? 'Desligar câmera' : 'Ligar câmera';
+      button.setAttribute('aria-label', button.title);
     } catch (error) {
       showToast(`Não foi possível acessar a câmera: ${error.message}`);
     }
@@ -914,15 +1402,16 @@
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
       const track = stream.getVideoTracks()[0];
       call.displayStream = stream;
-      await call.videoSender.replaceTrack(track);
+      await replaceCallVideoTrack(call, track);
       const displayAudio = stream.getAudioTracks()[0];
-      if (displayAudio && call.audioSender) {
+      if (displayAudio && callAudioSenders(call).length) {
         const audioContext = new AudioContext();
         const destination = audioContext.createMediaStreamDestination();
         audioContext.createMediaStreamSource(call.localStream).connect(destination);
         audioContext.createMediaStreamSource(new MediaStream([displayAudio])).connect(destination);
         call.audioContext = audioContext;
-        await call.audioSender.replaceTrack(destination.stream.getAudioTracks()[0]);
+        call.sharedAudioStream = destination.stream;
+        await replaceCallAudioTrack(call, call.sharedAudioStream.getAudioTracks()[0]);
       }
       button.classList.add('active');
       if (call.localVideo) call.localVideo.srcObject = stream;
@@ -940,12 +1429,13 @@
     if (!display) return;
     call.displayStream = null;
     if (call.audioContext) {
-      await call.audioSender.replaceTrack(call.localStream.getAudioTracks()[0]);
+      await replaceCallAudioTrack(call, call.localStream.getAudioTracks()[0]);
       await call.audioContext.close();
       call.audioContext = null;
+      call.sharedAudioStream = null;
     }
     const cameraTrack = call.localStream?.getVideoTracks()[0];
-    await call.videoSender.replaceTrack(cameraTrack?.enabled ? cameraTrack : null);
+    await replaceCallVideoTrack(call, cameraTrack?.enabled ? cameraTrack : null);
     display.getTracks().forEach(track => track.stop());
     if (call.localVideo) call.localVideo.srcObject = call.localStream;
   }
@@ -954,6 +1444,34 @@
     const call = state.call;
     if (!call) return;
     state.call = null;
+    if (call.group) {
+      if (document.fullscreenElement === call.card) {
+        try {
+          await document.exitFullscreen();
+        } catch (error) {
+          console.error('Não foi possível sair da tela cheia da chamada:', error);
+        }
+      }
+      if (call.fullscreenChangeHandler) {
+        document.removeEventListener('fullscreenchange', call.fullscreenChangeHandler);
+      }
+      for (const peer of call.peers.values()) peer.peerConnection.close();
+      if (call.audioContext) await call.audioContext.close();
+      call.displayStream?.getTracks().forEach(track => track.stop());
+      call.localStream?.getTracks().forEach(track => track.stop());
+      if (call.joined) {
+        try {
+          await api('/api/calls/groups/leave', {
+            method: 'POST',
+            body: JSON.stringify({ conversationId: call.conversation.id }),
+          });
+        } catch (error) {
+          showToast(`Não foi possível avisar o grupo que você saiu: ${error.message}`);
+        }
+      }
+      overlay.querySelector('.callback')?.remove();
+      return;
+    }
     clearTimeout(call.timeout);
     clearTimeout(call.disconnectTimeout);
     if (sendSignal) {
@@ -983,7 +1501,11 @@
   async function processCallSignal(signal) {
     if (!state.conversations.some(item => item.id === signal.conversationId)) await refreshData();
     const conversation = state.conversations.find(item => item.id === signal.conversationId);
-    if (!conversation || conversation.isGroup) return;
+    if (!conversation) return;
+    if (conversation.isGroup) {
+      await processGroupSignal(signal, conversation);
+      return;
+    }
     if (signal.type === 'offer') {
       if (state.call) {
         const busyCall = {
@@ -1160,9 +1682,11 @@
     [['☎', 'Chamada de voz'], ['▣', 'Chamada de vídeo']].forEach(([symbol, label], index) => {
       const button = document.createElement('button');
       button.textContent = symbol;
-      button.title = label;
-      button.setAttribute('aria-label', label);
-      button.disabled = conversation.isGroup;
+      const actionLabel = conversation.isGroup
+        ? `${label} em grupo (até 4 pessoas)`
+        : label;
+      button.title = actionLabel;
+      button.setAttribute('aria-label', actionLabel);
       button.onclick = () => startCall(conversation, index === 1);
       actions.append(button);
     });
