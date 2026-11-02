@@ -1,0 +1,121 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Serif+Display&display=swap');
+
+:root {
+	color-scheme: light;
+	--ink: #17231e;
+	--muted: #64716a;
+	--paper: #f3f2e9;
+	--acid: #c9ef65;
+	--line: rgba(23, 35, 30, .12);
+}
+
+* { box-sizing: border-box; }
+
+body {
+	min-height: 100vh;
+	margin: 0;
+	display: grid;
+	place-items: center;
+	padding: 32px;
+	color: var(--ink);
+	font: 16px/1.5 'DM Sans', sans-serif;
+	background-color: var(--paper);
+	background-image:
+		linear-gradient(135deg, transparent 0 72%, rgba(201, 239, 101, .42) 72% 72.2%, transparent 72.2%),
+		repeating-linear-gradient(0deg, transparent 0 47px, rgba(23, 35, 30, .035) 47px 48px),
+		repeating-linear-gradient(90deg, transparent 0 47px, rgba(23, 35, 30, .035) 47px 48px);
+}
+
+.login-container {
+	width: min(100%, 560px);
+	padding: 48px 0;
+	animation: arrive .65s cubic-bezier(.2, .75, .25, 1) both;
+}
+
+.logo {
+	display: inline-flex;
+	align-items: center;
+	gap: 12px;
+	margin-bottom: 72px;
+	font-size: 1.05rem;
+	font-weight: 700;
+	letter-spacing: .02em;
+}
+
+.logo-icon {
+	width: 46px;
+	height: 46px;
+	display: grid;
+	place-items: center;
+	border: 1px solid var(--ink);
+	border-radius: 14px 14px 14px 4px;
+	background: var(--acid);
+	font-size: 1.3rem;
+	font-weight: 700;
+}
+
+h1 {
+	max-width: 10ch;
+	margin: 0 0 18px;
+	font: 400 56px/1.02 'DM Serif Display', Georgia, serif;
+}
+
+p {
+	max-width: 42ch;
+	margin: 0;
+	color: var(--muted);
+	font-size: 1rem;
+}
+
+a {
+	min-height: 54px;
+	width: fit-content;
+	margin-top: 34px;
+	padding: 0 22px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 24px;
+	border: 1px solid var(--ink);
+	border-radius: 5px;
+	color: var(--ink);
+	background: var(--acid);
+	box-shadow: 4px 4px 0 var(--ink);
+	font-weight: 700;
+	text-decoration: none;
+	transition: transform .18s ease, box-shadow .18s ease, background-color .18s ease;
+}
+
+a::after {
+	content: '\2192';
+	font-size: 1.2rem;
+}
+
+a:hover {
+	transform: translate(2px, 2px);
+	box-shadow: 2px 2px 0 var(--ink);
+	background: #d7f58a;
+}
+
+a:focus-visible {
+	outline: 3px solid #34725b;
+	outline-offset: 4px;
+}
+
+@keyframes arrive {
+	from { opacity: 0; transform: translateY(14px); }
+	to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 600px) {
+	body { padding: 22px; background-size: auto, 32px 32px, 32px 32px; }
+	.login-container { padding: 24px 0; }
+	.logo { margin-bottom: 56px; }
+	h1 { max-width: 11ch; font-size: 46px; }
+	p { font-size: .95rem; }
+	a { width: 100%; justify-content: space-between; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}

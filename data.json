@@ -1,0 +1,13 @@
+{
+  "users": [
+    {
+      "id": "eadfe4ff-b563-4bb7-8f7b-2f089a6b4813",
+      "username": "",
+      "displayName": "",
+      "passwordSalt": "",
+      "passwordHash": "a816606e5c4de0f2939831246814e7f0a87d5d50cd86fa42055bd593ffd984d633716d742de6328dbc61092c350566004bfb747cdb3782ca2d634e19696e4304"
+    }
+  ],
+  "conversations": [],
+  "emojis": []
+}
